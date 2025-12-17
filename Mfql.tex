@@ -1,0 +1,42 @@
+\documentclass{article}
+\usepackage{amsmath}  % 数学公式支持
+\usepackage{times}    % 字体匹配论文风格
+% 关键：algorithm2e 配置（对应图中格式）
+\usepackage[ruled, vlined, linesnumbered]{algorithm2e}
+% （ruled: 标题加横线；vlined: 块结构加竖线；linesnumbered: 显示行号）
+
+\begin{document}
+
+\begin{algorithm}[t]  % [t]表示优先放在页面顶部
+\caption{Mean Flow Q-Learning (MFQL)}  % 算法标题
+\KwIn{Policy parameters$\theta$;Critic parameter $\phi$;Experience replay buffer $\mathcal{D}$;Discount factor $\gamma$; mean flow scale $\alpha$}  % 输入（图中“Function”的参数）
+\KwOut{mean flow policy$\pi_\theta$}
+\BlankLine
+\textbf{Function}$\mu_\theta(o,\epsilon)$\tcp*{mean flow sample}
+\Begin{
+    Sample noise$\epsilon$\\
+    Return $\epsilon - \mu_\theta(o,\epsilon,0,1)$
+}
+\BlankLine
+\While{not converged}{  % While循环（图中“while”）
+    Sample batch $\{(o,a,r,o')\} \leftarrow \mathcal{D}$ \\
+    $\epsilon \sim \mathcal{N}(0,I_d)$ \\
+    $a' \leftarrow \mu_\theta(o,\epsilon,0,1)$\\
+    Update$\phi$ to minimize $\mathbb{E}\left[\left(Q_\phi(o,a) - r - \gamma Q_{\bar{\phi}}(o',a')\right)^2\right]$\tcp*{train $Q_\phi(o,a)$}
+    
+    $x_1 =\epsilon \sim \mathcal{N}(0,I_d)$ \\
+    Sample $t,r$\\
+    $x_0 = a$\\
+    $x_t = (1-t)x_0 + t x_1$\\
+    $v = x_1-x_0$\\
+    $u,dudt = jvp(u,(x_t,r,t),(v,0,1)$\\
+    $utgt = v - (t-r) dudt$\\
+    $z \sim \mathcal{N}(0,I_d)$\\
+    $a^\pi \leftarrow \mu_\theta(o,z,0,1)$\\
+    Update$\theta$ to minimize $\mathbb{E}\left[\left-Q_\phi(o,a^\pi) + \alpha (u_\theta - stopgradient(utgt))^2\right]$
+}
+
+\Return $\pi_\theta$  % 返回语句
+\end{algorithm}
+
+\end{document}
