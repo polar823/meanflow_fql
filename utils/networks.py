@@ -304,4 +304,30 @@ class MeanActorVectorField(nn.Module):
 
         return v
     
+class Latent_Space_Policy(nn.Module):
+    hidden_dims: Sequence[int]
+    action_dim: int
+    layer_norm: bool = False
+    encoder: nn.Module = None
+    log_std_min: float = -20.0
+    log_std_max: float = 2.0
+
+    def setup(self) -> None:
+        self.mlp = MLP((*self.hidden_dims, self.action_dim*2), activate_final=False, layer_norm=self.layer_norm)
+    
+    @nn.compact
+    def __call__(self, observations, is_encoded=False):
+        if not is_encoded and self.encoder is not None:
+            observations = self.encoder(observations)
+        inputs = jnp.concatenate([observations],axis=-1)
+
+        v = self.mlp(inputs)
+        mean, log_std = jnp.split(v, 2, axis=-1)
+        
+        # 3. 限制数值范围，防止梯度爆炸或数值不稳定
+        log_std = jnp.clip(log_std, self.log_std_min, self.log_std_max)
+        
+        # 只返回参数，不进行采样
+        return mean, log_std
+    
 
