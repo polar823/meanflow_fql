@@ -11,16 +11,7 @@ from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 from utils.networks import ActorVectorField, Value , Latent_Space_Policy
 
-@staticmethod
-def reparameterize(mean, log_std, rng,action_scale=1.5):
-    """
-    Reparameterization Trick: z = mu + sigma * epsilon
-    """
-    std = jnp.exp(log_std)
-    epsilon = jax.random.normal(rng, shape=mean.shape)
-    raw_noise = mean + std * epsilon
-    steered_noise = jnp.tanh(raw_noise) * action_scale
-    return steered_noise
+
 
 class SFPLSAgent(flax.struct.PyTreeNode):
     """Flow Q-learning (FQL) agent with action chunking. 
@@ -30,13 +21,16 @@ class SFPLSAgent(flax.struct.PyTreeNode):
     network: Any
     config: Any = nonpytree_field()
     @staticmethod
-    def reparameterize(mean, log_std, rng):
+    @staticmethod
+    def reparameterize(mean, log_std, rng,action_scale=1.5):
         """
         Reparameterization Trick: z = mu + sigma * epsilon
         """
         std = jnp.exp(log_std)
         epsilon = jax.random.normal(rng, shape=mean.shape)
-        return mean + std * epsilon
+        raw_noise = mean + std * epsilon
+        steered_noise = jnp.tanh(raw_noise) * action_scale
+        return steered_noise
 
     def critic_loss(self, batch, grad_params, rng):
         """Compute the FQL critic loss."""
@@ -115,12 +109,16 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             q_loss = -q.mean()
         elif self.config["actor_type"] == "steer_policy_with_latent_space":
             rng, noise_rng = jax.random.split(rng)
-            noises = jax.random.normal(noise_rng, (batch_size, action_dim))
-            target_flow_actions = self.compute_flow_actions(batch['observations'], noises=noises)
+            # noises = jax.random.normal(noise_rng, (batch_size, action_dim))
+            # target_flow_actions = self.compute_flow_actions(batch['observations'], noises=noises)
             mean, log_std = self.network.select('actor_steer_with_latent_space')(batch['observations'],params=grad_params)
+            distill_loss = 0.5 * jnp.sum(
+                jnp.exp(2 * log_std) + jnp.square(mean) - 1.0 - 2 * log_std,
+                axis=-1
+            ).mean()
             control_noises = self.reparameterize(mean, log_std, rng)
             actor_actions = self.compute_flow_actions(batch['observations'], noises=control_noises)
-            distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
+            # distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
             actor_actions = jnp.clip(actor_actions, -1, 1)
             qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
@@ -349,10 +347,23 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         network_args = {k: v[1] for k, v in network_info.items()}
 
         network_def = ModuleDict(networks)
+        # if config["weight_decay"] > 0.:
+        #     network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
+        # else:
+        #     network_tx = optax.adam(learning_rate=config['lr'])
         if config["weight_decay"] > 0.:
-            network_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
+            base_tx = optax.adamw(learning_rate=config['lr'], weight_decay=config["weight_decay"])
         else:
-            network_tx = optax.adam(learning_rate=config['lr'])
+            base_tx = optax.adam(learning_rate=config['lr'])
+
+        # 如果配置了 max_grad_norm，则应用梯度裁剪
+        if config.get("max_grad_norm", 0) > 0:
+            network_tx = optax.chain(
+                optax.clip_by_global_norm(config["max_grad_norm"]),
+                base_tx
+            )
+        else:
+            network_tx = base_tx
         network_params = network_def.init(init_rng, **network_args)['params']
         network = TrainState.create(network_def, network_params, tx=network_tx)
 
@@ -394,6 +405,7 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
+            max_grad_norm=100.,
         )
     )
     return config
