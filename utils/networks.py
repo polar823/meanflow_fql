@@ -329,5 +329,66 @@ class Latent_Space_Policy(nn.Module):
         
         # 只返回参数，不进行采样
         return mean, log_std
-    
 
+
+class Flow_Solution_Euler(nn.Module):#input:observation,t,xt,s------>>output:F(s,t,xt)---->>xs = xt +(s-t)*F(s,x,xt)
+    hidden_dims: Sequence[int]
+    action_dim: int
+    layer_norm: bool = False
+    encoder: nn.Module = None
+    use_fourier_features: bool = False
+    fourier_feature_dim: int = 64
+    
+    def setup(self) -> None:
+        self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
+        if self.use_fourier_features:
+            self.ff = FourierFeatures(self.fourier_feature_dim)
+    @nn.compact
+    def __call__(self, observations, actions, times_begin,times_end, is_encoded=False):
+        """Return the vectors at the given states, actions, and times (optional).
+
+        Args:
+            observations: Observations.
+            actions: Actions.
+            times: Times (optional).
+            is_encoded: Whether the observations are already encoded.
+        """
+        if not is_encoded and self.encoder is not None:
+            observations = self.encoder(observations)
+        if self.use_fourier_features:
+            times_begin = self.ff(times_begin)
+            times_end = self.ff(times_end)
+        inputs = jnp.concatenate([observations, actions, times_begin,times_end], axis=-1)
+        v = self.mlp(inputs)
+        return v
+    
+class Flow_Solution_Trigonometric(nn.Module):#input:observation,t,xt,s------>>output:xs
+    hidden_dims: Sequence[int]
+    action_dim: int
+    layer_norm: bool = False
+    encoder: nn.Module = None
+    use_fourier_features: bool = False
+    fourier_feature_dim: int = 64
+    
+    def setup(self) -> None:
+        self.mlp = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
+        if self.use_fourier_features:
+            self.ff = FourierFeatures(self.fourier_feature_dim)
+    @nn.compact
+    def __call__(self, observations, actions, times_end,times_begin, is_encoded=False):
+        """Return the vectors at the given states, actions, and times (optional).
+
+        Args:
+            observations: Observations.
+            actions: Actions.
+            times: Times (optional).
+            is_encoded: Whether the observations are already encoded.
+        """
+        if not is_encoded and self.encoder is not None:
+            observations = self.encoder(observations)
+        if self.use_fourier_features:
+            times_begin = self.ff(times_begin)
+            times_end = self.ff(times_end)
+        inputs = jnp.concatenate([observations, actions, times_begin,times_end], axis=-1)
+        v = self.mlp(inputs)
+        return jnp.cos(jnp.pi/2.0*(times_begin-times_end))*actions + jnp.sin(jnp.pi/2.0*(times_begin-times_end))*(times_begin-times_end)*v

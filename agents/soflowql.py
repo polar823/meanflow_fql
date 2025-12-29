@@ -9,34 +9,15 @@ import optax
 
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import ActorVectorField, Value , Latent_Space_Policy
+from utils.networks import ActorVectorField, Value,Flow_Solution_Euler,Flow_Solution_Trigonometric
 
-@staticmethod
-def reparameterize(mean, log_std, rng,action_scale=1.5):
-    """
-    Reparameterization Trick: z = mu + sigma * epsilon
-    """
-    std = jnp.exp(log_std)
-    epsilon = jax.random.normal(rng, shape=mean.shape)
-    raw_noise = mean + std * epsilon
-    steered_noise = jnp.tanh(raw_noise) * action_scale
-    return steered_noise
-
-class SFPLSAgent(flax.struct.PyTreeNode):
+class ACSFQLAgent(flax.struct.PyTreeNode):
     """Flow Q-learning (FQL) agent with action chunking. 
     """
 
     rng: Any
     network: Any
     config: Any = nonpytree_field()
-    @staticmethod
-    def reparameterize(mean, log_std, rng):
-        """
-        Reparameterization Trick: z = mu + sigma * epsilon
-        """
-        std = jnp.exp(log_std)
-        epsilon = jax.random.normal(rng, shape=mean.shape)
-        return mean + std * epsilon
 
     def critic_loss(self, batch, grad_params, rng):
         """Compute the FQL critic loss."""
@@ -77,17 +58,44 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         else:
             batch_actions = batch["actions"][..., 0, :] # take the first one
         batch_size, action_dim = batch_actions.shape
-        rng, x_rng, t_rng = jax.random.split(rng, 3)
+        rng, x_rng, t_rng, s_rng, fm_rng = jax.random.split(rng, 5)
 
         # BC flow loss.
-        x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
-        x_1 = batch_actions
-        t = jax.random.uniform(t_rng, (batch_size, 1))
-        x_t = (1 - t) * x_0 + t * x_1
-        vel = x_1 - x_0
-
-        pred = self.network.select('actor_bc_flow')(batch['observations'], x_t, t, params=grad_params)
-
+        x_1 = jax.random.normal(x_rng, (batch_size, action_dim))
+        x_0 = batch_actions
+        mu_fm, std_fm = self.config['time_mean'][0], self.config['time_std'][0]
+        t_fm = jax.nn.sigmoid(mu_fm + std_fm * jax.random.normal(fm_rng, (batch_size, 1)))
+        x_t_fm = (1 - t_fm) * x_0 + t_fm * x_1
+        gt_velocity = x_1 - x_0
+        if self.config["bc_class"] == "Euler":
+            pred = self.network.select('actor_bc_flow')(batch['observations'],x_t_fm,t_fm,t_fm,params=grad_params)
+            raw_mse = jnp.mean(pred - gt_velocity)
+            w_fm = 1.0/(raw_mse + self.config["epsilon"])**self.config["p"]
+            bc_flow_loss_fm = w_fm * raw_mse
+        elif self.config["bc_class"] == "trigonometric":
+            pred = jnp.pi/2.0*self.network.select('actor_bc_flow')(batch['observations'],x_t_fm,t_fm,t_fm,params=grad_params)
+            raw_mse = jnp.mean(jnp.square(pred - gt_velocity))
+            w_fm = 1.0/(jnp.pi/2.0*(raw_mse + self.config["epsilon"]))**self.config["p"]
+            bc_flow_loss_fm = w_fm * raw_mse
+        #consistency loss
+        mu_s, std_s = self.config['time_mean'][1], self.config['time_std'][1]
+        mu_t, std_t = self.config['time_mean'][2], self.config['time_std'][2]
+        time_2 = jax.nn.sigmoid(mu_t + std_t * jax.random.normal(t_rng, (batch_size, 1)))
+        time_1 = jax.nn.sigmoid(mu_s + std_s * jax.random.normal(s_rng, (batch_size, 1)))
+        t = jnp.clip(time_2,min=1e-4)
+        s = jnp.min(time_1,t - 1e-4)
+        l = t + (s-t)*self.config['l_end_ratio']
+        x_t = (1-t) * x_0 +t * x_1
+        v_t = x_1 - x_0
+        if self.config["bc_class"] == "Euler":
+            pred = x_t + (s-t) * self.network.select('actor_bc_flow')(batch['observations'],x_t,t,s,params=grad_params)
+            tgt = jax.lax.stop_gradient(x_t + (s-t) * self.network.select('actor_bc_flow')(batch['observations'],x_t+v_t(l-t),l,s))
+            raw_mse_scm = jnp.mean(jnp.square(pred - tgt))
+            w_scm = 1/((t-l)*(raw_mse_scm/jnp.square(t-l)+self.config['epsilon'])**self.config['p'])
+            bc_flow_loss_scm = w_scm*raw_mse_scm
+        elif self.config["bc_class"] == "trigonometric":
+            pass
+        bc_flow_loss = 0.5*bc_flow_loss_scm + 0.5*bc_flow_loss_fm
         # only bc on the valid chunk indices
         if self.config["action_chunking"]:
             bc_flow_loss = jnp.mean(
@@ -113,20 +121,6 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
             q = jnp.mean(qs, axis=0)
             q_loss = -q.mean()
-        elif self.config["actor_type"] == "steer_policy_with_latent_space":
-            rng, noise_rng = jax.random.split(rng)
-            noises = jax.random.normal(noise_rng, (batch_size, action_dim))
-            target_flow_actions = self.compute_flow_actions(batch['observations'], noises=noises)
-            mean, log_std = self.network.select('actor_steer_with_latent_space')(batch['observations'],params=grad_params)
-            control_noises = self.reparameterize(mean, log_std, rng)
-            actor_actions = self.compute_flow_actions(batch['observations'], noises=control_noises)
-            distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
-
-            actor_actions = jnp.clip(actor_actions, -1, 1)
-            qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
-            q = jnp.mean(qs, axis=0)
-            q_loss = -q.mean()
-
         else:
             distill_loss = jnp.zeros(())
             q_loss = jnp.zeros(())
@@ -138,7 +132,6 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             'actor_loss': actor_loss,
             'bc_flow_loss': bc_flow_loss,
             'distill_loss': distill_loss,
-            'q_loss': q_loss,
         }
 
     @jax.jit
@@ -235,19 +228,6 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             bsize = len(indices)
             actions = jnp.reshape(actions, (-1, self.config["actor_num_samples"], action_dim))[jnp.arange(bsize), indices, :].reshape(
                 bshape + (action_dim,))
-        elif self.config["actor_type"] == "steer_policy_with_latent_space":
-            rng, sample_rng = jax.random.split(rng)
-            mean, log_std = self.network.select('actor_steer_with_latent_space')(observations)
-            
-            # (3) 调用 Agent 内的采样函数获取噪声 (Latent Variable)
-            noises = self.reparameterize(mean, log_std, sample_rng)
-            
-            # (4) 传入 Flow 模型生成最终动作
-            # (此时 noises 已经具备了针对当前 obs 的方向性)
-            actions = self.compute_flow_actions(observations, noises)
-            
-            # (5) 截断
-            actions = jnp.clip(actions, -1, 1)
 
         return actions
 
@@ -304,7 +284,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             encoders['critic'] = encoder_module()
             encoders['actor_bc_flow'] = encoder_module()
             encoders['actor_onestep_flow'] = encoder_module()
-            encoders['steer_flow_policy_with_latent_space'] = encoder_module()
+            # encoders['actor_bc_flow_solution'] = encoder_module()
 
         # Define networks.
         critic_def = Value(
@@ -314,7 +294,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             encoder=encoders.get('critic'),
         )
 
-        actor_bc_flow_def = ActorVectorField(
+        actor_bc_flow_def = Flow_Solution_Euler(
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
@@ -322,23 +302,17 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             use_fourier_features=config["use_fourier_features"],
             fourier_feature_dim=config["fourier_feature_dim"],
         )
-        # actor_onestep_flow_def = ActorVectorField(
-        #     hidden_dims=config['actor_hidden_dims'],
-        #     action_dim=full_action_dim,
-        #     layer_norm=config['actor_layer_norm'],
-        #     encoder=encoders.get('actor_onestep_flow'),
-        # )
-        actor_steer_with_latent_space_def = Latent_Space_Policy(
+        actor_onestep_flow_def = ActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
-            action_dim= full_action_dim,
+            action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
-            encoder=encoders.get('steer_flow_policy_with_latent_space'),
+            encoder=encoders.get('actor_onestep_flow'),
         )
 
         
         network_info = dict(
             actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
-            actor_steer_with_latent_space=(actor_steer_with_latent_space_def, (ex_observations, )),
+            actor_onestep_flow=(actor_onestep_flow_def, (ex_observations, full_actions)),
             critic=(critic_def, (ex_observations, full_actions)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations, full_actions)),
         )
@@ -370,7 +344,7 @@ def get_config():
 
     config = ml_collections.ConfigDict(
         dict(
-            agent_name='sfpls',  # Agent name.
+            agent_name='acfql',  # Agent name.
             ob_dims=ml_collections.config_dict.placeholder(list),  # Observation dimensions (will be set automatically).
             action_dim=ml_collections.config_dict.placeholder(int),  # Action dimension (will be set automatically).
             lr=3e-4,  # Learning rate.
@@ -389,11 +363,19 @@ def get_config():
             encoder=ml_collections.config_dict.placeholder(str),  # Visual encoder name (None, 'impala_small', etc.).
             horizon_length=ml_collections.config_dict.placeholder(int), # will be set
             action_chunking=True,  # False means n-step return
-            actor_type="steer_policy_with_latent_space",
+            actor_type="distill-ddpg",
             actor_num_samples=32,  # for actor_type="best-of-n" only
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
+            epsilon = 1e-4,
+            time_mean = [-0.9,-0.4,-0.9],
+            time_std = [1.6,1.6,1.6],
+            p = 0.75,
+            l_schedule = "Exponent",
+            l_init_ratio = 0.1,   
+            l_end_ratio = 0.002,
+            bc_class = "Euler"#Euler or trigonometric
         )
     )
     return config
