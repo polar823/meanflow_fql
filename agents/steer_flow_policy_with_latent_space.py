@@ -116,6 +116,8 @@ class SFPLSAgent(flax.struct.PyTreeNode):
                 jnp.exp(2 * log_std) + jnp.square(mean) - 1.0 - 2 * log_std,
                 axis=-1
             ).mean()
+            target_kl = 0.05  # 这个值可以调，比如 0.01 ~ 0.1
+            distill_loss = jnp.maximum(0.0, distill_loss - target_kl)
             control_noises = self.reparameterize(mean, log_std, rng)
             actor_actions = self.compute_flow_actions(batch['observations'], noises=control_noises)
             # distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
