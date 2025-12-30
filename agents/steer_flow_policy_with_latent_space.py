@@ -152,7 +152,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         elif self.config["actor_type"] == "steer_policy_with_latent_space":
             rng, noise_rng = jax.random.split(rng)
             noises = jax.random.normal(noise_rng, (batch_size, action_dim))
-            target_flow_actions = self.compute_flow_actions(batch['observations'], noises=noises)
+            target_flow_actions = self.compute_mean_flow_actions(batch['observations'], noises=noises)
             mean, log_std = self.network.select('actor_steer_with_latent_space')(batch['observations'],params=grad_params)
             # distill_loss = 0.5 * jnp.sum(
             #     jnp.exp(2 * log_std) + jnp.square(mean) - 1.0 - 2 * log_std,
