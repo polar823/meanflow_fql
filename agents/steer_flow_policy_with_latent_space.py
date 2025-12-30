@@ -71,27 +71,69 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         else:
             batch_actions = batch["actions"][..., 0, :] # take the first one
         batch_size, action_dim = batch_actions.shape
-        rng, x_rng, t_rng = jax.random.split(rng, 3)
+        rng, x_rng, time_rng, mask_rng, policy_noise_rng, distill_rng = jax.random.split(rng, 6)
 
         # BC flow loss.
-        x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
-        x_1 = batch_actions
-        t = jax.random.uniform(t_rng, (batch_size, 1))
-        x_t = (1 - t) * x_0 + t * x_1
-        vel = x_1 - x_0
+        # x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
+        # x_1 = batch_actions
+        # t = jax.random.uniform(t_rng, (batch_size, 1))
+        # x_t = (1 - t) * x_0 + t * x_1
+        # vel = x_1 - x_0
+        x_1 = jax.random.normal(x_rng, (batch_size, action_dim))
+        x_0 = batch_actions
+        mu = self.config['time_logit_mu']
+        sigma = self.config['time_logit_sigma']
+        time_pair = mu + sigma * jax.random.normal(time_rng, (batch_size, 2))
+        time_pair = jax.nn.sigmoid(time_pair)
+        sorted_pair = jnp.sort(time_pair, axis=-1)
+        t_begin = sorted_pair[:, :1]
+        t_end = sorted_pair[:, 1:]
+        instant_mask = jax.random.bernoulli(mask_rng, self.config['time_instant_prob'], (batch_size, 1))
+        t_begin = jnp.where(instant_mask, t_end, t_begin)
+        # x_t = (1 - t) * x_0 + t * x_1
+        # vel = x_1 - x_0
+        x_t = (1-t_end)*x_0 + t_end * x_1
+        x_t = (1-t_end)*x_0 + t_end * x_1
+        cond_mean_flow = lambda actions, t_begin, t_end: self.network.select('actor_bc_flow')(batch['observations'], actions, t_begin, t_end, params=grad_params)
+        u ,dudt = jax.jvp(cond_mean_flow,(x_t,t_begin,t_end),(self.network.select('actor_bc_flow')(batch['observations'], x_t, t_end,t_end, params=grad_params),jnp.zeros_like(t_begin),jnp.ones_like(t_end)))
+        if self.config["action_chunking"]:
+            # === 【JVP Mask 修复 V2】 ===
+            # 1. 获取相关维度信息
+            # batch_actions 的 shape 是 (B, Horizon * ActionDim)，例如 (256, 25)
+            total_flat_dim = batch_actions.shape[-1] 
+            horizon = self.config["horizon_length"]
+            # 计算单步动作维度，例如 25 // 5 = 5
+            single_step_dim = total_flat_dim // horizon 
 
-        pred = self.network.select('actor_bc_flow')(batch['observations'], x_t, t, params=grad_params)
+            # 2. 处理 Mask
+            # batch["valid"] shape 通常是 (B, Horizon, 1)
+            mask = batch["valid"]
+            
+            # 这一步是关键：我们要在最后一个维度重复 single_step_dim 次 (5次)，而不是 total_flat_dim 次 (25次)
+            # (B, 5, 1) -> (B, 5, 5)
+            mask_expanded = jnp.repeat(mask, single_step_dim, axis=-1) 
+
+            # 3. 展平以匹配 dudt 的形状
+            # (B, 5, 5) -> (B, 25)
+            mask_flat = mask_expanded.reshape(batch_size, -1)
+
+            # 4. 应用 Mask
+            dudt = dudt * mask_flat
+            # =====================
+        # u_tgt = jax.lax.stop_gradient(x_1 - x_0 - (t_end - t_begin) * dudt)
+        pred = self.network.select('actor_bc_flow')(batch['observations'], x_t, t_begin,t_end, params=grad_params) + (t_end-t_begin)*jax.lax.stop_gradient(dudt)
+        
 
         # only bc on the valid chunk indices
         if self.config["action_chunking"]:
             bc_flow_loss = jnp.mean(
                 jnp.reshape(
-                    (pred - vel) ** 2, 
+                    (pred - x_1+x_0) ** 2, 
                     (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
                 ) * batch["valid"][..., None]
             )
         else:
-            bc_flow_loss = jnp.mean(jnp.square(pred - vel))
+            bc_flow_loss = jnp.mean(jnp.square(pred - x_1+x_0))
 
         if self.config["actor_type"] == "distill-ddpg":
             # Distillation loss.
@@ -119,7 +161,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             target_kl = 0.05  # 这个值可以调，比如 0.01 ~ 0.1
             distill_loss = jnp.maximum(0.0, distill_loss - target_kl)
             control_noises = self.reparameterize(mean, log_std, rng)
-            actor_actions = self.compute_flow_actions(batch['observations'], noises=control_noises)
+            actor_actions = self.compute_mean_flow_actions(batch['observations'], noises=control_noises)
             # distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
             actor_actions = jnp.clip(actor_actions, -1, 1)
@@ -244,10 +286,30 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             
             # (4) 传入 Flow 模型生成最终动作
             # (此时 noises 已经具备了针对当前 obs 的方向性)
-            actions = self.compute_flow_actions(observations, noises)
+            actions = self.compute_mean_flow_actions(observations, noises)
             
             # (5) 截断
             actions = jnp.clip(actions, -1, 1)
+
+        return actions
+    @jax.jit
+    def compute_mean_flow_actions(
+        self,
+        observations,
+        noises,
+    ):
+        """Compute actions from the mean flow model """
+        if self.config['encoder'] is not None:
+            observations = self.network.select('actor_bc_flow_encoder')(observations)
+        times_begin = jnp.zeros((*noises.shape[:-1], 1))
+        times_end = jnp.ones_like(times_begin)
+        actions = noises - self.network.select('actor_bc_flow')(observations,noises,times_begin,times_end,is_encoded=True)
+        # Euler method.
+        # for i in range(self.config['flow_steps']):
+        #     t = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
+        #     vels = self.network.select('actor_bc_flow')(observations, actions, t, is_encoded=True)
+        #     actions = actions + vels / self.config['flow_steps']
+        actions = jnp.clip(actions, -1, 1)
 
         return actions
 
@@ -408,6 +470,9 @@ def get_config():
             fourier_feature_dim=64,
             weight_decay=0.,
             max_grad_norm=100.,
+            time_logit_mu=-0.4,
+            time_logit_sigma=1.0,
+            time_instant_prob=0.2,
         )
     )
     return config
