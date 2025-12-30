@@ -350,7 +350,8 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ex_times = ex_actions[..., :1]
+        ex_times_begin = ex_actions[..., :1]
+        ex_times_end = ex_actions[..., :1]
         ob_dims = ex_observations.shape
         action_dim = ex_actions.shape[-1]
         if config["action_chunking"]:
@@ -399,7 +400,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
 
         
         network_info = dict(
-            actor_bc_flow=(actor_bc_mean_flow_def, (ex_observations, full_actions, ex_times)),
+            actor_bc_flow=(actor_bc_mean_flow_def, (ex_observations, full_actions, ex_times_begin,ex_times_end)),
             actor_steer_with_latent_space=(actor_steer_with_latent_space_def, (ex_observations, )),
             critic=(critic_def, (ex_observations, full_actions)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations, full_actions)),
