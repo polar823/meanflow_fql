@@ -151,18 +151,18 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             q_loss = -q.mean()
         elif self.config["actor_type"] == "steer_policy_with_latent_space":
             rng, noise_rng = jax.random.split(rng)
-            # noises = jax.random.normal(noise_rng, (batch_size, action_dim))
-            # target_flow_actions = self.compute_flow_actions(batch['observations'], noises=noises)
+            noises = jax.random.normal(noise_rng, (batch_size, action_dim))
+            target_flow_actions = self.compute_flow_actions(batch['observations'], noises=noises)
             mean, log_std = self.network.select('actor_steer_with_latent_space')(batch['observations'],params=grad_params)
-            distill_loss = 0.5 * jnp.sum(
-                jnp.exp(2 * log_std) + jnp.square(mean) - 1.0 - 2 * log_std,
-                axis=-1
-            ).mean()
-            target_kl = 0.05  # 这个值可以调，比如 0.01 ~ 0.1
-            distill_loss = jnp.maximum(0.0, distill_loss - target_kl)
+            # distill_loss = 0.5 * jnp.sum(
+            #     jnp.exp(2 * log_std) + jnp.square(mean) - 1.0 - 2 * log_std,
+            #     axis=-1
+            # ).mean()
+            # target_kl = 0.05  # 这个值可以调，比如 0.01 ~ 0.1
+            # distill_loss = jnp.maximum(0.0, distill_loss - target_kl)
             control_noises = self.reparameterize(mean, log_std, rng)
             actor_actions = self.compute_mean_flow_actions(batch['observations'], noises=control_noises)
-            # distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
+            distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
             actor_actions = jnp.clip(actor_actions, -1, 1)
             qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
