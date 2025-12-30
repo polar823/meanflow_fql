@@ -9,7 +9,7 @@ import optax
 
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import ActorVectorField, Value , Latent_Space_Policy
+from utils.networks import ActorVectorField, MeanActorVectorField, Value , Latent_Space_Policy
 
 
 
@@ -376,7 +376,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             encoder=encoders.get('critic'),
         )
 
-        actor_bc_flow_def = ActorVectorField(
+        actor_bc_mean_flow_def = MeanActorVectorField(
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
@@ -399,7 +399,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
 
         
         network_info = dict(
-            actor_bc_flow=(actor_bc_flow_def, (ex_observations, full_actions, ex_times)),
+            actor_bc_flow=(actor_bc_mean_flow_def, (ex_observations, full_actions, ex_times)),
             actor_steer_with_latent_space=(actor_steer_with_latent_space_def, (ex_observations, )),
             critic=(critic_def, (ex_observations, full_actions)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations, full_actions)),
