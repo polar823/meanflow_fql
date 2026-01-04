@@ -22,7 +22,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
     config: Any = nonpytree_field()
     @staticmethod
     @staticmethod
-    def reparameterize(mean, log_std, rng,action_scale=1.0):
+    def reparameterize(mean, log_std, rng,action_scale=2.0):
         """
         Reparameterization Trick: z = mu + sigma * epsilon
         """

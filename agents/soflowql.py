@@ -58,54 +58,92 @@ class ACSFQLAgent(flax.struct.PyTreeNode):
         else:
             batch_actions = batch["actions"][..., 0, :] # take the first one
         batch_size, action_dim = batch_actions.shape
-        rng, x_rng, t_rng, s_rng, fm_rng = jax.random.split(rng, 5)
+        scm_rng, x_rng, t_rng, s_rng, fm_rng = jax.random.split(rng, 5)
+        # rng_scm, rng_fm = jax.random.split(rng, 3)
+        split_idx = (batch_size * self.config['my_lambda']).astype(int)
+        batch_scm = jax.tree_util.tree_map(lambda x: x[:split_idx], batch)
+        # FM 用后一部分 (split_idx ~ end)
+        batch_fm = jax.tree_util.tree_map(lambda x: x[split_idx:], batch)
+        bs_scm = split_idx
+        bs_fm = batch_size - split_idx
+        if self.config["action_chunking"]:
+            actions_scm = jnp.reshape(batch_scm["actions"], (batch_scm["action"].shape[0], -1))
+        else:
+            actions_scm = batch_scm["actions"][..., 0, :]
+        if self.config["action_chunking"]:
+            actions_fm = jnp.reshape(batch_scm["actions"], (batch_scm["action"].shape[0], -1))
+        else:
+            actions_fm = batch_scm["actions"][..., 0, :]
+        def compute_mse(pred, target):
+            diff = (pred - target)**2
+            if self.config["action_chunking"]:
+                # Reshape back to (Batch, Horizon, Action_Dim)
+                diff = diff.reshape(batch_size, self.config["horizon_length"], self.config["action_dim"])
+                # batch["valid"] shape is (Batch, Horizon), add dim for broadcasting -> (Batch, Horizon, 1)
+                mask = batch["valid"][..., None]
+                
+                # Apply mask to squared error
+                squared_error = diff * mask
+                
+                # Normalize by the number of valid elements
+                # sum(mask) gives total valid timesteps, multiply by action_dim for total valid elements
+                denom = jnp.sum(mask) * diff.shape[-1]
+                mse = jnp.sum(squared_error) / jnp.maximum(denom, 1e-8)
+            else:
+                mse = jnp.mean(jnp.square(diff))
+            return mse
 
         # BC flow loss.
-        x_1 = jax.random.normal(x_rng, (batch_size, action_dim))
-        x_0 = batch_actions
+        x_1_fm = jax.random.normal(x_rng, (bs_fm, action_dim))
+        x_0_fm = actions_fm
         mu_fm, std_fm = self.config['time_mean'][0], self.config['time_std'][0]
-        t_fm = jax.nn.sigmoid(mu_fm + std_fm * jax.random.normal(fm_rng, (batch_size, 1)))
-        x_t_fm = (1 - t_fm) * x_0 + t_fm * x_1
-        gt_velocity = x_1 - x_0
+        t_fm = jax.nn.sigmoid(mu_fm + std_fm * jax.random.normal(fm_rng, (bs_fm, 1)))
+        x_t_fm = (1 - t_fm) * x_0_fm + t_fm * x_1_fm
+        gt_velocity = x_1_fm - x_0_fm
         if self.config["bc_class"] == "Euler":
-            pred = self.network.select('actor_bc_flow')(batch['observations'],x_t_fm,t_fm,t_fm,params=grad_params)
-            raw_mse = jnp.mean(pred - gt_velocity)
+            pred = self.network.select('actor_bc_flow')(batch_fm['observations'],x_t_fm,t_fm,t_fm,params=grad_params)
+            # raw_mse = jnp.mean(pred - gt_velocity)
+            raw_mse = compute_mse(pred,gt_velocity)
             w_fm = 1.0/(raw_mse + self.config["epsilon"])**self.config["p"]
             bc_flow_loss_fm = w_fm * raw_mse
         elif self.config["bc_class"] == "trigonometric":
-            pred = jnp.pi/2.0*self.network.select('actor_bc_flow')(batch['observations'],x_t_fm,t_fm,t_fm,params=grad_params)
-            raw_mse = jnp.mean(jnp.square(pred - gt_velocity))
+            pred = jnp.pi/2.0*self.network.select('actor_bc_flow')(batch_fm['observations'],x_t_fm,t_fm,t_fm,params=grad_params)
+            # raw_mse = jnp.mean(jnp.square(pred - gt_velocity))
+            raw_mse = compute_mse(pred,gt_velocity)
             w_fm = 1.0/(jnp.pi/2.0*(raw_mse + self.config["epsilon"]))**self.config["p"]
             bc_flow_loss_fm = w_fm * raw_mse
         #consistency loss
+        x_1_scm = jax.random.normal(scm_rng, (bs_scm, action_dim))
+        x_0_scm = actions_scm
         mu_s, std_s = self.config['time_mean'][1], self.config['time_std'][1]
         mu_t, std_t = self.config['time_mean'][2], self.config['time_std'][2]
-        time_2 = jax.nn.sigmoid(mu_t + std_t * jax.random.normal(t_rng, (batch_size, 1)))
-        time_1 = jax.nn.sigmoid(mu_s + std_s * jax.random.normal(s_rng, (batch_size, 1)))
+        time_2 = jax.nn.sigmoid(mu_t + std_t * jax.random.normal(t_rng, (bs_scm, 1)))
+        time_1 = jax.nn.sigmoid(mu_s + std_s * jax.random.normal(s_rng, (bs_scm, 1)))
         t = jnp.clip(time_2,min=1e-4)
         s = jnp.min(time_1,t - 1e-4)
         l = t + (s-t)*self.config['l_end_ratio']
-        x_t = (1-t) * x_0 +t * x_1
-        v_t = x_1 - x_0
+        x_t = (1-t) * x_0_scm +t * x_1_scm
+        v_t = x_1_scm - x_0_scm
         if self.config["bc_class"] == "Euler":
             pred = x_t + (s-t) * self.network.select('actor_bc_flow')(batch['observations'],x_t,t,s,params=grad_params)
-            tgt = jax.lax.stop_gradient(x_t + (s-t) * self.network.select('actor_bc_flow')(batch['observations'],x_t+v_t(l-t),l,s))
-            raw_mse_scm = jnp.mean(jnp.square(pred - tgt))
+            tgt = jax.lax.stop_gradient(x_t + (s-t) * self.network.select('actor_bc_flow')(batch_scm['observations'],x_t+v_t(l-t),l,s))
+            # raw_mse_scm = jnp.mean(jnp.square(pred - tgt))
+            raw_mse_scm = compute_mse(pred,tgt)
             w_scm = 1/((t-l)*(raw_mse_scm/jnp.square(t-l)+self.config['epsilon'])**self.config['p'])
             bc_flow_loss_scm = w_scm*raw_mse_scm
         elif self.config["bc_class"] == "trigonometric":
             pass
-        bc_flow_loss = 0.5*bc_flow_loss_scm + 0.5*bc_flow_loss_fm
+        bc_flow_loss = self.config['my_lambda']*bc_flow_loss_scm + (1-self.config['my_lambda'])*bc_flow_loss_fm
         # only bc on the valid chunk indices
-        if self.config["action_chunking"]:
-            bc_flow_loss = jnp.mean(
-                jnp.reshape(
-                    (pred - vel) ** 2, 
-                    (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
-                ) * batch["valid"][..., None]
-            )
-        else:
-            bc_flow_loss = jnp.mean(jnp.square(pred - vel))
+        # if self.config["action_chunking"]:
+        #     bc_flow_loss = jnp.mean(
+        #         jnp.reshape(
+        #             (pred - vel) ** 2, 
+        #             (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
+        #         ) * batch["valid"][..., None]
+        #     )
+        # else:
+        #     bc_flow_loss = jnp.mean(jnp.square(pred - vel))
 
         if self.config["actor_type"] == "distill-ddpg":
             # Distillation loss.
@@ -372,10 +410,11 @@ def get_config():
             time_mean = [-0.9,-0.4,-0.9],
             time_std = [1.6,1.6,1.6],
             p = 0.75,
-            l_schedule = "Exponent",
-            l_init_ratio = 0.1,   
+            # l_schedule = "Exponent",
+            # l_init_ratio = 0.1,   
             l_end_ratio = 0.002,
-            bc_class = "Euler"#Euler or trigonometric
+            bc_class = "Euler",#Euler or trigonometric
+            my_lambda = 0.5
         )
     )
     return config
