@@ -1,4 +1,6 @@
-import glob, tqdm, wandb, os, json, random, time, jax
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+import glob, tqdm, wandb, json, random, time, jax
 from absl import app, flags
 from ml_collections import config_flags
 from log_utils import setup_wandb, get_exp_name, get_flag_dict, CsvLogger,get_wandb_video

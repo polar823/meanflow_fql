@@ -22,7 +22,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
     config: Any = nonpytree_field()
     @staticmethod
     @staticmethod
-    def reparameterize(mean, log_std, rng,action_scale=1.5):
+    def reparameterize(mean, log_std, rng,action_scale=1.0):
         """
         Reparameterization Trick: z = mu + sigma * epsilon
         """
@@ -93,7 +93,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         # x_t = (1 - t) * x_0 + t * x_1
         # vel = x_1 - x_0
         x_t = (1-t_end)*x_0 + t_end * x_1
-        x_t = (1-t_end)*x_0 + t_end * x_1
+        # x_t = (1-t_end)*x_0 + t_end * x_1
         cond_mean_flow = lambda actions, t_begin, t_end: self.network.select('actor_bc_flow')(batch['observations'], actions, t_begin, t_end, params=grad_params)
         u ,dudt = jax.jvp(cond_mean_flow,(x_t,t_begin,t_end),(self.network.select('actor_bc_flow')(batch['observations'], x_t, t_end,t_end, params=grad_params),jnp.zeros_like(t_begin),jnp.ones_like(t_end)))
         if self.config["action_chunking"]:
