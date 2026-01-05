@@ -21,16 +21,29 @@ class SFPLSAgent(flax.struct.PyTreeNode):
     network: Any
     config: Any = nonpytree_field()
     @staticmethod
+    def rescale(action,low,high):
+        return low + (0.5 * (action + 1.0) * (high - low))
     @staticmethod
-    def reparameterize(mean, log_std, rng,action_scale=2.0):
+    def reparameterize(mean, log_std, rng,action_scale=2.0):#sample a action and get log_prob
         """
         Reparameterization Trick: z = mu + sigma * epsilon
         """
         std = jnp.exp(log_std)
         epsilon = jax.random.normal(rng, shape=mean.shape)
         raw_noise = mean + std * epsilon
-        steered_noise = jnp.tanh(raw_noise) * action_scale
-        return steered_noise
+        squashed_noise = jnp.tanh(raw_noise)
+        # steered_noise = squashed_noise * action_scale
+        log_prob_u = jax.scipy.stats.norm.logpdf(raw_noise, loc=mean, scale=std).sum(axis=-1)
+    
+        # 3.2 Tanh 变换的修正项 (Jacobian Correction)
+        # Formula: log_pi(a) = log_pi(u) - sum(log(1 - tanh(u)^2))
+        # 使用数值稳定的公式：log(1 - tanh(x)^2) = 2 * (log(2) - x - softplus(-2x))
+        # 或者简单的 epsilon 法: log(1 - action^2 + 1e-6)
+        tanh_correction = jnp.sum(jnp.log(1 - squashed_noise**2 + 1e-6), axis=-1)
+        
+        # 3.3 最终 Log Prob
+        log_prob = log_prob_u - tanh_correction
+        return squashed_noise , log_prob
 
     def critic_loss(self, batch, grad_params, rng):
         """Compute the FQL critic loss."""
@@ -42,9 +55,12 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         
         # TD loss
         rng, sample_rng = jax.random.split(rng)
-        next_actions = self.sample_actions(batch['next_observations'][..., -1, :], rng=sample_rng)
-
-        next_qs = self.network.select(f'target_critic')(batch['next_observations'][..., -1, :], actions=next_actions)
+        next_actions , next_actions_log_prob = self.sample_actions(batch['next_observations'][..., -1, :], rng=sample_rng)
+        if self.config['ent_coeffient'] ==  None:
+            next_qs = self.network.select(f'target_critic')(batch['next_observations'][..., -1, :], actions=next_actions)
+        else:
+            next_qs = self.network.select(f'target_critic')(batch['next_observations'][..., -1, :], actions=next_actions)
+            next_qs = next_qs - self.config['ent_coeffient']*next_actions_log_prob
         if self.config['q_agg'] == 'min':
             next_q = next_qs.min(axis=0)
         else:
@@ -160,7 +176,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             # ).mean()
             # target_kl = 0.05  # 这个值可以调，比如 0.01 ~ 0.1
             # distill_loss = jnp.maximum(0.0, distill_loss - target_kl)
-            control_noises = self.reparameterize(mean, log_std, rng)
+            control_noises,action_log_prob = self.reparameterize(mean, log_std, rng)
             actor_actions = self.compute_mean_flow_actions(batch['observations'], noises=control_noises)
             distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
 
@@ -168,13 +184,14 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
             q = jnp.mean(qs, axis=0)
             q_loss = -q.mean()
+            ent_loss = self.config['ent_coeffient']*action_log_prob
 
         else:
             distill_loss = jnp.zeros(())
             q_loss = jnp.zeros(())
 
         # Total loss.
-        actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss + q_loss
+        actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss + q_loss + ent_loss
 
         return actor_loss, {
             'actor_loss': actor_loss,
@@ -282,7 +299,8 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             mean, log_std = self.network.select('actor_steer_with_latent_space')(observations)
             
             # (3) 调用 Agent 内的采样函数获取噪声 (Latent Variable)
-            noises = self.reparameterize(mean, log_std, sample_rng)
+            noises , log_prob= self.reparameterize(mean, log_std, sample_rng)
+            noises = self.rescale(noises,self.config['action_rescale_low'],self.config['action_rescale_high'])
             
             # (4) 传入 Flow 模型生成最终动作
             # (此时 noises 已经具备了针对当前 obs 的方向性)
@@ -290,6 +308,8 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             
             # (5) 截断
             actions = jnp.clip(actions, -1, 1)
+
+            return actions , log_prob
 
         return actions
     @jax.jit
@@ -474,6 +494,10 @@ def get_config():
             time_logit_mu=-0.4,
             time_logit_sigma=1.0,
             time_instant_prob=0.2,
+            ent_coeffient = None,
+            action_rescale_low = -2.0,
+            action_rescale_high = 2.0,
+
         )
     )
     return config

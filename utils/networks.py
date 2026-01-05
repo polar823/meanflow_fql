@@ -313,7 +313,9 @@ class Latent_Space_Policy(nn.Module):
     log_std_max: float = 2.0
 
     def setup(self) -> None:
-        self.mlp = MLP((*self.hidden_dims, self.action_dim*2), activate_final=False, layer_norm=self.layer_norm)
+        self.mlp = MLP(self.hidden_dims, activate_final=False, layer_norm=self.layer_norm)
+        self.mu = nn.Dense(features=self.action_dim)
+        self.log_std = nn.Dense(features=self.action_dim)
         # self.mlp_log_std = MLP((*self.hidden_dims, self.action_dim), activate_final=False, layer_norm=self.layer_norm)
     
     @nn.compact
@@ -323,14 +325,15 @@ class Latent_Space_Policy(nn.Module):
         inputs = jnp.concatenate([observations],axis=-1)
 
         v = self.mlp(inputs)
-        mean, log_std = jnp.split(v, 2, axis=-1)
-        
+        mean = self.mu(v)
+        log_std = self.log_std(v)
         
         # 3. 限制数值范围，防止梯度爆炸或数值不稳定
         log_std = jnp.clip(log_std, self.log_std_min, self.log_std_max)
         
         # 只返回参数，不进行采样
         return mean, log_std
+ 
 
 
 class Flow_Solution_Euler(nn.Module):#input:observation,t,xt,s------>>output:F(s,t,xt)---->>xs = xt +(s-t)*F(s,x,xt)
