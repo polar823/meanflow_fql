@@ -198,6 +198,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             'bc_flow_loss': bc_flow_loss,
             'distill_loss': distill_loss,
             'q_loss': q_loss,
+            'ent_loss': ent_loss,
         }
 
     @jax.jit
