@@ -55,7 +55,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         
         # TD loss
         rng, sample_rng = jax.random.split(rng)
-        next_actions , next_actions_log_prob = self.sample_actions(batch['next_observations'][..., -1, :], rng=sample_rng)
+        next_actions , next_actions_log_prob = self.sample_actions_with_log_prob(batch['next_observations'][..., -1, :], rng=sample_rng)
         if self.config['ent_coeffient'] ==  None:
             next_qs = self.network.select(f'target_critic')(batch['next_observations'][..., -1, :], actions=next_actions)
         else:
@@ -251,7 +251,23 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         # update_size = batch["observations"].shape[0]
         agent, infos = jax.lax.scan(self._update, self, batch)
         return agent, jax.tree_util.tree_map(lambda x: x.mean(), infos)
-    
+    @jax.jit
+    def sample_actions_with_log_prob(self, observations, rng=None):
+        """专门用于训练时获取动作和熵"""
+        if self.config["actor_type"] == "steer_policy_with_latent_space":
+            rng, sample_rng = jax.random.split(rng)
+            mean, log_std = self.network.select('actor_steer_with_latent_space')(observations)
+            
+            # 获取 Log Prob
+            noises, log_prob = self.reparameterize(mean, log_std, sample_rng)
+            
+            actions = self.compute_mean_flow_actions(observations, noises)
+            actions = jnp.clip(actions, -1, 1)
+            return actions, log_prob
+        
+        # 其他类型如果没有 entropy 逻辑，返回 0 或 None
+        actions = self.sample_actions(observations, rng)
+        return actions, jnp.zeros(actions.shape[0])
     @jax.jit
     def sample_actions(
         self,
@@ -310,7 +326,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             # (5) 截断
             actions = jnp.clip(actions, -1, 1)
 
-            return actions , log_prob
+            return actions
 
         return actions
     @jax.jit
