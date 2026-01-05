@@ -184,7 +184,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
             q = jnp.mean(qs, axis=0)
             q_loss = -q.mean()
-            ent_loss = self.config['ent_coeffient']*action_log_prob
+            ent_loss = self.config['ent_coeffient'] * action_log_prob
 
         else:
             distill_loss = jnp.zeros(())
@@ -494,7 +494,7 @@ def get_config():
             time_logit_mu=-0.4,
             time_logit_sigma=1.0,
             time_instant_prob=0.2,
-            ent_coeffient = None,
+            ent_coeffient = 0.1,
             action_rescale_low = -2.0,
             action_rescale_high = 2.0,
 
