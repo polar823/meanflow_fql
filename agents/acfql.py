@@ -98,7 +98,8 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         else:
             distill_loss = jnp.zeros(())
             q_loss = jnp.zeros(())
-
+        if self.is_online == True:
+            bc_flow_loss = 0.0
         # Total loss.
         actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss + q_loss
 
