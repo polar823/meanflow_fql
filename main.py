@@ -214,7 +214,7 @@ def main(_):
     
     action_queue = []
     action_dim = example_batch["actions"].shape[-1]
-
+    agent = agent.replace(is_online=True)
     # Online RL
     update_info = {}
 

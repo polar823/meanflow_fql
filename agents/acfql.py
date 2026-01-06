@@ -18,6 +18,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
     rng: Any
     network: Any
     config: Any = nonpytree_field()
+    is_online: bool = nonpytree_field(default=False)
 
     def critic_loss(self, batch, grad_params, rng):
         """Compute the FQL critic loss."""
@@ -309,7 +310,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim
 
-        return cls(rng, network=network, config=flax.core.FrozenDict(**config))
+        return cls(rng, network=network, config=flax.core.FrozenDict(**config),is_online=False)
 
 
 def get_config():

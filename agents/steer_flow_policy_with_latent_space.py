@@ -20,6 +20,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
     rng: Any
     network: Any
     config: Any = nonpytree_field()
+    is_online: bool = nonpytree_field(default=False)
     @staticmethod
     def rescale(action,low,high):
         return low + (0.5 * (action + 1.0) * (high - low))
@@ -476,7 +477,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim
 
-        return cls(rng, network=network, config=flax.core.FrozenDict(**config))
+        return cls(rng, network=network, config=flax.core.FrozenDict(**config),is_online=False)
 
 
 def get_config():
@@ -514,6 +515,7 @@ def get_config():
             ent_coeffient = 0.1,
             action_rescale_low = -2.0,
             action_rescale_high = 2.0,
+
 
         )
     )
