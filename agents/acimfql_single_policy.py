@@ -256,6 +256,16 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             bsize = len(indices)
             actions = jnp.reshape(actions, (-1, self.config["actor_num_samples"], action_dim))[jnp.arange(bsize), indices, :].reshape(
                 bshape + (action_dim,))
+        elif self.config['actor_type'] =="single_policy":
+            noises = jax.random.normal(rng,
+                (
+                    *observations.shape[: -len(self.config['ob_dims'])],  # batch_size
+                    self.config['action_dim'] * \
+                        (self.config['horizon_length'] if self.config["action_chunking"] else 1),
+                ),
+            )
+            actions = self.compute_mean_flow_actions(observations, noises)
+            actions = jnp.clip(actions, -1, 1)
 
         return actions
     @jax.jit
