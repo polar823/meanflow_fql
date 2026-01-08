@@ -56,12 +56,12 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         
         # TD loss
         rng, sample_rng = jax.random.split(rng)
-        next_actions , next_actions_log_prob = self.sample_actions_with_log_prob(batch['next_observations'][..., -1, :], rng=sample_rng)
+        next_actions = self.sample_actions(batch['next_observations'][..., -1, :], rng=sample_rng)
         if self.config['ent_coeffient'] ==  None:
             next_qs = self.network.select(f'target_critic')(batch['next_observations'][..., -1, :], actions=next_actions)
         else:
             next_qs = self.network.select(f'target_critic')(batch['next_observations'][..., -1, :], actions=next_actions)
-            next_qs = next_qs - self.config['ent_coeffient']*next_actions_log_prob
+            # next_qs = next_qs - self.config['ent_coeffient']*next_actions_log_prob
         if self.config['q_agg'] == 'min':
             next_q = next_qs.min(axis=0)
         else:
@@ -185,7 +185,7 @@ class SFPLSAgent(flax.struct.PyTreeNode):
             qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
             q = jnp.mean(qs, axis=0)
             q_loss = -q.mean()
-            ent_loss = self.config['ent_coeffient'] * action_log_prob.mean()
+            # ent_loss = self.config['ent_coeffient'] * action_log_prob.mean()
 
         else:
             distill_loss = jnp.zeros(())
@@ -193,14 +193,14 @@ class SFPLSAgent(flax.struct.PyTreeNode):
         if self.is_online == True:
             bc_flow_loss = 0.0
         # Total loss.
-        actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss + q_loss + ent_loss
+        actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss + q_loss 
 
         return actor_loss, {
             'actor_loss': actor_loss,
             'bc_flow_loss': bc_flow_loss,
             'distill_loss': distill_loss,
             'q_loss': q_loss,
-            'ent_loss': ent_loss,
+            # 'ent_loss': ent_loss,
         }
 
     @jax.jit
