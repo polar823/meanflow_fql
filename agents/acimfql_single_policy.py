@@ -139,26 +139,30 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
             q = jnp.mean(qs, axis=0)
             q_loss = -q.mean()
-        else:
+        elif self.config["actor_type"] == "single_policy":
+            rng,ql_rng = jax.random.split(rng)
+            noises = jax.random.normal(ql_rng,(batch_size, action_dim))
             distill_loss = jnp.zeros(())
-            q_loss = jnp.zeros(())
-
-        if self.config["actor_type"] == "single_policy":
-            rng, noise_rng = jax.random.split(rng)
-            noises = jax.random.normal(noise_rng, (batch_size, action_dim))
+            observations = batch['observations']
+            if self.config['encoder'] is not None:
+                observations = self.network.select('actor_bc_flow_encoder')(observations)
             times_begin = jnp.zeros((*noises.shape[:-1], 1))
             times_end = jnp.ones_like(times_begin)
-            actor_actions = self.network.select('actor_bc_flow')(batch['observations'],noises, times_begin,times_end,params=grad_params)
+            actions = noises - self.network.select('actor_bc_flow')(observations,noises,times_begin,times_end,is_encoded=True,params=grad_params)
+            actions = actions = jnp.clip(actions, -1, 1)
             qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
             q = jnp.mean(qs, axis=0)
             q_loss = -q.mean()
+        else:
+            distill_loss = jnp.zeros(())
+            q_loss = jnp.zeros(())
         # Total loss.
-        actor_loss = self.config['alpha'] * bc_flow_loss + q_loss
+        actor_loss = bc_flow_loss + self.config['alpha'] * distill_loss + q_loss
 
         return actor_loss, {
             'actor_loss': actor_loss,
             'bc_flow_loss': bc_flow_loss,
-            # 'distill_loss': distill_loss,
+            'distill_loss': distill_loss,
             'q_loss' : q_loss,
         }
 
@@ -256,15 +260,16 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             bsize = len(indices)
             actions = jnp.reshape(actions, (-1, self.config["actor_num_samples"], action_dim))[jnp.arange(bsize), indices, :].reshape(
                 bshape + (action_dim,))
-        elif self.config['actor_type'] =="single_policy":
-            noises = jax.random.normal(rng,
+        elif self.config["actor_type"] == "single_policy":
+            noises = jax.random.normal(
+                rng,
                 (
                     *observations.shape[: -len(self.config['ob_dims'])],  # batch_size
                     self.config['action_dim'] * \
                         (self.config['horizon_length'] if self.config["action_chunking"] else 1),
                 ),
             )
-            actions = self.compute_mean_flow_actions(observations, noises)
+            actions = self.compute_mean_flow_actions(observations,noises)
             actions = jnp.clip(actions, -1, 1)
 
         return actions
