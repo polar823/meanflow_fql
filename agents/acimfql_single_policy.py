@@ -150,7 +150,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             times_end = jnp.ones_like(times_begin)
             actions = noises - self.network.select('actor_bc_flow')(observations,noises,times_begin,times_end,is_encoded=True,params=grad_params)
             actions = actions = jnp.clip(actions, -1, 1)
-            qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
+            qs = self.network.select(f'critic')(batch['observations'], actions=actions)
             q = jnp.mean(qs, axis=0)
             q_loss = -q.mean()
         else:
